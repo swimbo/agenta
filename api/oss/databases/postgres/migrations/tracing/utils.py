@@ -66,7 +66,7 @@ async def get_current_migration_head_from_db(engine: AsyncEngine):
     async with engine.connect() as connection:
         try:
             result = await connection.execute(
-                text("SELECT version_num FROM alembic_version")
+                text("SELECT version_num FROM alembic_version_tracing")
             )  # type: ignore
         except (asyncpg.exceptions.UndefinedTableError, ProgrammingError):
             # Note: If the alembic_version table does not exist, it will result in raising an UndefinedTableError exception.

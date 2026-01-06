@@ -36,6 +36,9 @@ target_metadata = Base.metadata
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 
+# Get version_table from config for separate core/tracing version tracking
+version_table = config.get_main_option("version_table") or "alembic_version"
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
@@ -53,6 +56,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table=version_table,
     )
 
     with context.begin_transaction():
@@ -64,6 +68,7 @@ def do_run_migrations(connection: Connection) -> None:
         transaction_per_migration=True,
         connection=connection,
         target_metadata=target_metadata,
+        version_table=version_table,
     )
 
     with context.begin_transaction():
