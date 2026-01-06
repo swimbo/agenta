@@ -15,6 +15,10 @@ class EnvironSettings(BaseModel):
     AGENTA_AUTH_KEY: str = os.getenv("AGENTA_AUTH_KEY") or ""
     AGENTA_CRYPT_KEY: str = os.getenv("AGENTA_CRYPT_KEY") or ""
 
+    # Express API JWT Secret - allows validating JWTs issued by Express API
+    # This enables shared authentication between Express and Python Agenta
+    EXPRESS_JWT_SECRET: str = os.getenv("EXPRESS_JWT_SECRET") or ""
+
     # AGENTA-SPECIFIC (OPTIONAL)
     AGENTA_AUTO_MIGRATIONS: bool = (
         os.getenv("AGENTA_AUTO_MIGRATIONS") or "true"

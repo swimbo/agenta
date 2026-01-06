@@ -37,12 +37,17 @@ _BEARER_TOKEN_PREFIX = "Bearer "
 _APIKEY_TOKEN_PREFIX = "ApiKey "
 _SECRET_TOKEN_PREFIX = "Secret "
 _ACCESS_TOKEN_PREFIX = "Access "
+_EXPRESS_TOKEN_PREFIX = "ExpressJWT "  # Express API JWT tokens
 
 _ALLOWED_TOKENS = (
     _BEARER_TOKEN_PREFIX,
     _APIKEY_TOKEN_PREFIX,
     _SECRET_TOKEN_PREFIX,
+    _EXPRESS_TOKEN_PREFIX,  # Support Express JWT tokens
 )
+
+# Express API JWT secret - allows Python Agenta to validate Express-issued JWTs
+_EXPRESS_JWT_SECRET = env.EXPRESS_JWT_SECRET if hasattr(env, 'EXPRESS_JWT_SECRET') else None
 
 _PUBLIC_ENDPOINTS = (
     # AGENTA
@@ -206,6 +211,15 @@ async def _authenticate(request: Request):
                     return await verify_secret_token(
                         request=request,
                         secret_token=auth_header[len(_SECRET_TOKEN_PREFIX) :],
+                    )
+
+                elif auth_header.startswith(_EXPRESS_TOKEN_PREFIX):
+                    # EXPRESS API JWT TOKEN
+                    return await verify_express_jwt_token(
+                        request=request,
+                        express_token=auth_header[len(_EXPRESS_TOKEN_PREFIX) :],
+                        query_project_id=query_project_id,
+                        query_workspace_id=query_workspace_id,
                     )
 
             else:
@@ -593,6 +607,50 @@ async def verify_bearer_token(
         raise exc
 
     except Exception as exc:  # pylint: disable=bare-except
+        # SuperTokens failed - try Express JWT as fallback
+        if _EXPRESS_JWT_SECRET and bearer_token:
+            try:
+                payload = decode(
+                    jwt=bearer_token,
+                    key=_EXPRESS_JWT_SECRET,
+                    algorithms=["HS256"],
+                )
+                express_user_id = payload.get("userId")
+                express_user_email = payload.get("email")
+
+                if express_user_id:
+                    log.debug(f"Bearer token validated as Express JWT for user: {express_user_id}")
+
+                    # Look up organization and workspace from project for Express JWT
+                    express_org_id = None
+                    express_org_name = None
+                    express_workspace_id = query_workspace_id
+
+                    if query_project_id:
+                        try:
+                            project = await db_manager.get_project_by_id(
+                                project_id=query_project_id,
+                            )
+                            if project:
+                                express_org_id = str(project.organization_id)
+                                express_workspace_id = str(project.workspace_id)
+                                if hasattr(project, 'organization') and project.organization:
+                                    express_org_name = project.organization.name
+                        except Exception as lookup_exc:
+                            log.warning(f"Failed to lookup project for Express JWT: {lookup_exc}")
+
+                    request.state.user_id = express_user_id
+                    request.state.user_email = express_user_email
+                    request.state.project_id = query_project_id
+                    request.state.workspace_id = express_workspace_id
+                    request.state.organization_id = express_org_id
+                    request.state.organization_name = express_org_name
+                    request.state.credentials = f"{_BEARER_TOKEN_PREFIX}{bearer_token}"
+                    return  # Express JWT validated successfully
+            except Exception as express_exc:
+                log.debug(f"Express JWT fallback also failed: {express_exc}")
+                pass  # Continue to raise UnauthorizedException
+
         await set_cache(
             project_id=query_project_id,
             user_id=user_id,
@@ -720,6 +778,83 @@ async def verify_secret_token(
 
     except Exception as exc:  # pylint: disable=bare-except
         raise InternalServerErrorException() from exc
+
+
+async def verify_express_jwt_token(
+    request: Request,
+    express_token: str,
+    query_project_id: Optional[str] = None,
+    query_workspace_id: Optional[str] = None,
+):
+    """
+    Verify JWT tokens issued by Express API.
+    Express JWT payload: { userId, email }
+    Maps to Python Agenta's request.state format.
+
+    This enables shared authentication between Express API and Python Agenta,
+    allowing both services to validate the same JWT tokens.
+    """
+    try:
+        if not _EXPRESS_JWT_SECRET:
+            log.warning("EXPRESS_JWT_SECRET not configured, cannot validate Express JWT")
+            raise UnauthorizedException()
+
+        payload = decode(
+            jwt=express_token,
+            key=_EXPRESS_JWT_SECRET,
+            algorithms=["HS256"],
+        )
+
+        # Map Express payload format to Python Agenta format
+        # Express uses camelCase: { userId, email }
+        # Python Agenta uses snake_case: { user_id, user_email }
+        user_id = payload.get("userId")
+        user_email = payload.get("email")
+
+        if not user_id:
+            log.warning("Express JWT missing userId field")
+            raise UnauthorizedException()
+
+        # Look up organization and workspace from project for Express JWT
+        express_org_id = None
+        express_org_name = None
+        express_workspace_id = query_workspace_id
+
+        if query_project_id:
+            try:
+                project = await db_manager.get_project_by_id(
+                    project_id=query_project_id,
+                )
+                if project:
+                    express_org_id = str(project.organization_id)
+                    express_workspace_id = str(project.workspace_id)
+                    if hasattr(project, 'organization') and project.organization:
+                        express_org_name = project.organization.name
+            except Exception as lookup_exc:
+                log.warning(f"Failed to lookup project for Express JWT: {lookup_exc}")
+
+        # Set request state - project_id from query, others from project lookup
+        request.state.user_id = user_id
+        request.state.user_email = user_email
+        request.state.project_id = query_project_id
+        request.state.workspace_id = express_workspace_id
+        request.state.organization_id = express_org_id
+        request.state.organization_name = express_org_name
+        request.state.credentials = f"{_EXPRESS_TOKEN_PREFIX}{express_token}"
+
+        log.debug(f"Validated Express JWT for user: {user_id}")
+
+    except DecodeError as exc:
+        log.warning(f"Express JWT decode error: {exc}")
+        raise UnauthorizedException() from exc
+
+    except ExpiredSignatureError as exc:
+        log.warning("Express JWT expired")
+        raise UnauthorizedException() from exc
+
+    except Exception as exc:
+        log.error(f"Express JWT validation error: {exc}")
+        raise UnauthorizedException() from exc
 
 
 async def sign_secret_token(
